@@ -40,7 +40,7 @@ class TradingEnv(environment.Environment[EnvState, EnvParams]):
     def __init__(self, token: str = "BTCUSDT", window_size: int = 30):
         super().__init__()
         self.window_size = window_size
-        data_dir = "/kaggle/input/btcusdt/"
+        data_dir = "data/token_data/" + token + "/"
         self.price_data = self.load_price_data(data_dir)
         self.data_len = len(self.price_data)
 
@@ -181,52 +181,65 @@ class TradingEnv(environment.Environment[EnvState, EnvParams]):
         indicators = {"ma7": ma7, "ma25": ma25, "rsi": rsi}
         return indicators
 
-    def get_observation(self, state: EnvState):
-        # Get historical prices for the window
+    def get_observation(self, state: EnvState) -> jnp.ndarray:
+        """
+        Optimized observation function using JAX operations.
+        Replaces loops and conditionals with vectorized operations.
+        """
+        # Calculate indices with proper bounds
         end_idx = state.time + 1
-        start_idx = max(0, end_idx - self.window_size)
-        price_window = self.price_data[start_idx:end_idx]
+        start_idx = jnp.maximum(0, end_idx - self.window_size)
 
-        # Pad if necessary
-        if len(price_window) < self.window_size:
-            pad_size = self.window_size - len(price_window)
-            price_window = jnp.pad(price_window, (pad_size, 0), mode="edge")
-
-        # Get technical indicators
-        # Only get indicators if we have enough data
-        ma7 = self.technical_indicators["ma7"][
-            min(state.time, len(self.technical_indicators["ma7"]) - 1)
-        ]
-        ma25 = self.technical_indicators["ma25"][
-            min(state.time, len(self.technical_indicators["ma25"]) - 1)
-        ]
-        rsi = self.technical_indicators["rsi"][
-            min(state.time, len(self.technical_indicators["rsi"]) - 1)
-        ]
-
-        # Normalize features
-        price_window = (price_window - jnp.mean(price_window)) / (
-            jnp.std(price_window) + 1e-8
+        # Get price window with single slice
+        price_window = lax.dynamic_slice(
+            self.price_data,
+            (start_idx,),
+            (jnp.minimum(self.window_size, end_idx - start_idx),),
         )
 
-        # Include position information and account value
+        # Pad in a single operation
+        pad_size = self.window_size - price_window.shape[0]
+        price_window = jnp.pad(price_window, (pad_size, 0), mode="edge")
+
+        # Vectorized normalization
+        price_mean = jnp.mean(price_window)
+        price_std = jnp.std(price_window) + 1e-8
+        price_window = (price_window - price_mean) / price_std
+
+        # Get technical indicators using safe indexing
+        indicator_idx = jnp.minimum(
+            state.time,
+            jnp.array(
+                [
+                    len(self.technical_indicators["ma7"]) - 1,
+                    len(self.technical_indicators["ma25"]) - 1,
+                    len(self.technical_indicators["rsi"]) - 1,
+                ]
+            ),
+        )
+
+        ma7 = self.technical_indicators["ma7"][indicator_idx[0]]
+        ma25 = self.technical_indicators["ma25"][indicator_idx[1]]
+        rsi = self.technical_indicators["rsi"][indicator_idx[2]]
+
+        # Calculate portfolio metrics vectorized
         portfolio_value = state.cash + state.shares * state.price
-        position_size = (
-            state.shares * state.price / portfolio_value if portfolio_value > 0 else 0
+        position_size = jnp.where(
+            portfolio_value > 0, state.shares * state.price / portfolio_value, 0.0
         )
+        cash_ratio = jnp.where(portfolio_value > 0, state.cash / portfolio_value, 0.0)
 
+        # Single concatenate operation
         return jnp.concatenate(
             [
                 price_window,
                 jnp.array(
                     [
-                        ma7 / state.price - 1,  # MA7 relative to current price
-                        ma25 / state.price - 1,  # MA25 relative to current price
-                        rsi / 100,  # Normalize RSI to [0,1]
-                        position_size,  # Current position size as fraction of portfolio
-                        (
-                            state.cash / portfolio_value if portfolio_value > 0 else 0
-                        ),  # Cash ratio
+                        ma7 / state.price - 1,
+                        ma25 / state.price - 1,
+                        rsi / 100,
+                        position_size,
+                        cash_ratio,
                     ]
                 ),
             ]

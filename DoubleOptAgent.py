@@ -179,7 +179,7 @@ class PPOAgent:
         self.transaction_log.append(transaction)
 
     def save_transaction_log(self, filename="transaction_log.txt"):
-        dirr = "/kaggle/working/logs"
+        dirr = "logs"
         if not os.path.exists(dirr):
             os.makedirs(dirr)
 
@@ -564,3 +564,10 @@ class PPOAgent:
             self.save_transaction_log(f"transaction_log_update_{update}.txt")
 
         return trading_metrics
+
+
+config = PPOConfig()
+agent = PPOAgent(config)
+
+# Train the agent
+agent.train(num_updates=100)
