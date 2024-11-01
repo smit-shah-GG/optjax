@@ -172,20 +172,22 @@ class TradingEnv(environment.Environment[EnvState, EnvParams]):
 
         # Execute trade
         def hold(cash, shares):
-            return cash, shares
+            return jnp.array([cash, shares], dtype=jnp.float32)
 
         def buy(cash, shares):
             cost = new_price * (1 + self.default_params.transaction_cost)
             max_shares = jnp.floor(cash / cost)
             shares_to_buy = jnp.minimum(1, max_shares)  # Buy 1 share at a time
             total_cost = shares_to_buy * cost
-            return cash - total_cost, shares + shares_to_buy
+            return jnp.array(
+                [cash - total_cost, shares + shares_to_buy], dtype=jnp.float32
+            )
 
         def sell(cash, shares):
-            if shares > 0:
-                proceeds = new_price * (1 - self.default_params.transaction_cost)
-                return cash + proceeds, shares - 1  # Sell 1 share at a time
-            return cash, shares
+            proceeds = new_price * (1 - self.default_params.transaction_cost)
+            new_cash = jnp.where(shares > 0, cash + proceeds, cash)
+            new_shares = jnp.where(shares > 0, shares - 1, shares)
+            return jnp.array([new_cash, new_shares], dtype=jnp.float32)
 
         cash, shares = jax.lax.switch(
             action, [hold, buy, sell], state.cash, state.shares

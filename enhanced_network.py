@@ -122,14 +122,29 @@ class EnhancedActorCritic(nn.Module):
 
     @nn.compact
     def __call__(self, obs, training=True):
-        # Input shapes:
-        # obs: (batch_size, total_features)
-        # where total_features = window_size + num_technical_indicators + num_portfolio_features
+        # First, ensure obs is 2D
+        obs = obs.reshape(-1, obs.shape[-1]) if obs.ndim == 1 else obs
+
+        # Calculate the expected sizes based on your environment
+        window_size = 30
+        num_technical = 6
+        num_portfolio = 7
+        total_features = window_size + num_technical + num_portfolio
+
+        # Verify the input shape
+        assert (
+            obs.shape[-1] == total_features
+        ), f"Expected {total_features} features, got {obs.shape[-1]}"
 
         # Split observation into components
-        price_history = obs[:, :30]  # First 30 elements are price history
-        technical_indicators = obs[:, 30:36]  # Next 6 are technical indicators
-        portfolio_state = obs[:, 36:]  # Last 7 are portfolio state
+        start_idx = 0
+        price_history = obs[:, start_idx : start_idx + window_size]
+        start_idx += window_size
+
+        technical_indicators = obs[:, start_idx : start_idx + num_technical]
+        start_idx += num_technical
+
+        portfolio_state = obs[:, start_idx : start_idx + num_portfolio]
 
         # Encode each component
         price_encoded = PriceEncoder(hidden_dim=self.hidden_dim)(price_history)
@@ -140,19 +155,17 @@ class EnhancedActorCritic(nn.Module):
             portfolio_state
         )
 
-        # Combine encoded features
+        # Rest of the implementation remains the same
         combined = jnp.concatenate(
             [price_encoded, technical_encoded, portfolio_encoded], axis=-1
         )
 
-        # Process combined features
         x = nn.Dense(self.hidden_dim, kernel_init=nn.initializers.orthogonal(1.0))(
             combined
         )
         x = nn.gelu(x)
         x = nn.LayerNorm()(x)
 
-        # Additional processing layers
         for _ in range(self.num_layers - 1):
             x = nn.Dense(self.hidden_dim, kernel_init=nn.initializers.orthogonal(1.0))(
                 x
@@ -160,7 +173,6 @@ class EnhancedActorCritic(nn.Module):
             x = nn.gelu(x)
             x = nn.LayerNorm()(x)
 
-        # Risk assessment branch
         risk_features = nn.Dense(
             self.hidden_dim // 2, kernel_init=nn.initializers.orthogonal(1.0)
         )(x)
@@ -170,10 +182,8 @@ class EnhancedActorCritic(nn.Module):
         vol = nn.Dense(1, kernel_init=nn.initializers.orthogonal(1.0))(risk_features)
         sharpe = nn.Dense(1, kernel_init=nn.initializers.orthogonal(1.0))(risk_features)
 
-        # Combine all features including risk metrics
         features = jnp.concatenate([x, var, vol, sharpe], axis=-1)
 
-        # Actor head
         actor_features = nn.Dense(
             self.hidden_dim, kernel_init=nn.initializers.orthogonal(1.0)
         )(features)
@@ -182,7 +192,6 @@ class EnhancedActorCritic(nn.Module):
             self.action_dim, kernel_init=nn.initializers.orthogonal(0.01)
         )(actor_features)
 
-        # Dual critics
         critic1 = nn.Dense(
             self.hidden_dim, kernel_init=nn.initializers.orthogonal(1.0)
         )(features)
@@ -195,7 +204,6 @@ class EnhancedActorCritic(nn.Module):
         critic2 = nn.gelu(critic2)
         value2 = nn.Dense(1, kernel_init=nn.initializers.orthogonal(1.0))(critic2)
 
-        # Average the two critic values
         value = jnp.squeeze((value1 + value2) / 2, axis=-1)
 
         return action_logits, value
@@ -453,7 +461,7 @@ class PPOAgent:
 
         # Compute advantages using scan
         _, advantages = lax.scan(
-            gae_step, init=0.0, xs=(reversed_deltas, reversed_dones)
+            gae_step, init=jnp.zeros(256), xs=(reversed_deltas, reversed_dones)
         )
 
         # Flip back to original order
@@ -472,6 +480,12 @@ class PPOAgent:
         portfolio_values: jnp.ndarray,
         initial_cash: float,
     ) -> TradingMetrics:
+        # Ensure all arrays are the same length by taking the minimum length
+        min_length = min(len(prices), len(actions), len(portfolio_values))
+        prices = prices[:min_length]
+        actions = actions[:min_length]
+        portfolio_values = portfolio_values[:min_length]
+
         returns = (portfolio_values[1:] - portfolio_values[:-1]) / portfolio_values[:-1]
 
         total_return = (portfolio_values[-1] - initial_cash) / initial_cash
@@ -492,19 +506,20 @@ class PPOAgent:
         max_drawdown = jnp.max(drawdowns) * 100
 
         # Calculate the number of trades by detecting position changes
-        position_changes = jnp.diff(actions)
+        position_changes = jnp.diff(actions.squeeze())
         trades = position_changes != 0
         num_trades = jnp.sum(trades)
 
         # Track returns for individual trades
-        def calculate_trade_returns(carry, i):
-            current_position, entry_price, trade_returns = carry
+        def calculate_trade_returns(carry, x):
+            current_position, entry_price, cumulative_return = carry
+            price, action = x
 
-            # Check if position changed (only when i > 0)
-            position_changed = jnp.logical_and(i > 0, actions[i] != actions[i - 1])
+            # Check if position changed
+            position_changed = action != current_position
 
             # Calculate raw return
-            raw_return = (prices[i] - entry_price) / entry_price
+            raw_return = (price - entry_price) / (entry_price + 1e-8)
 
             # Determine if we should apply the return
             should_apply_return = jnp.logical_and(
@@ -520,42 +535,47 @@ class PPOAgent:
 
             # Update entry price
             new_entry_price = jnp.where(
-                jnp.logical_and(position_changed, actions[i] != 0),
-                prices[i],
+                jnp.logical_and(position_changed, action != 0),
+                price,
                 jnp.where(position_changed, 0.0, entry_price),
             )
 
             # Update current position
-            new_position = jnp.where(
-                position_changed, jnp.where(actions[i] == 1, 1, -1), current_position
-            )
+            new_position = jnp.where(position_changed, action, current_position)
 
-            # Update trade returns array
-            trade_returns = trade_returns.at[i].set(trade_return)
+            new_cumulative_return = cumulative_return + trade_return
 
-            return (new_position, new_entry_price, trade_returns), None
+            return (new_position, new_entry_price, new_cumulative_return), trade_return
 
-        # Initialize trade return list
-        trade_returns = jnp.zeros(len(actions))
-        _, _ = lax.scan(
-            calculate_trade_returns, (0, 0, trade_returns), jnp.arange(len(actions))
-        )
+        # Initialize carry state
+        init_carry = (jnp.array(0), jnp.array(0.0), jnp.array(0.0))
+
+        # Prepare data for scan
+        xs = (
+            prices[:-1],
+            actions.squeeze()[:-1],
+        )  # Use all but last element to match lengths
+
+        # Run the scan
+        _, trade_returns = lax.scan(calculate_trade_returns, init_carry, xs)
 
         # Calculate win rate, profit factor, and average trade return
-        positive_returns = jnp.sum(jnp.maximum(trade_returns, 0))
-        negative_returns = jnp.abs(jnp.sum(jnp.minimum(trade_returns, 0)))
-        win_rate = jnp.mean(trade_returns > 0) * 100 if len(trade_returns) > 0 else 0
+        non_zero_returns = jnp.where(trade_returns > 0, trade_returns, 0)
+        positive_returns = jnp.sum(jnp.maximum(non_zero_returns, 0))
+        negative_returns = jnp.abs(jnp.sum(jnp.minimum(non_zero_returns, 0)))
+
+        win_rate = jnp.where(
+            len(non_zero_returns) > 0, jnp.mean(non_zero_returns > 0) * 100, 0.0
+        )
+
         profit_factor = positive_returns / (negative_returns + 1e-8)
-        avg_trade_return = (
-            jnp.mean(trade_returns) * 100 if len(trade_returns) > 0 else 0
+        avg_trade_return = jnp.where(
+            len(non_zero_returns) > 0, jnp.mean(non_zero_returns) * 100, 0.0
         )
 
         # Calculate average position duration
         position_durations = jnp.where(actions[:-1] != 0, 1, 0)
-        avg_position_duration = (
-            jnp.mean(position_durations) if len(position_durations) > 0 else 0
-        )
-
+        avg_position_duration = jnp.mean(position_durations)
         return TradingMetrics(
             total_return=total_return.astype(float),
             sharpe_ratio=sharpe_ratio.astype(float),
@@ -594,12 +614,12 @@ class PPOAgent:
 
                 # Environment step
                 next_obs, next_state, reward, done, new_key = self.env.step(
-                    key, state, int(action)
+                    key, state, int(action[0])
                 )
                 key = new_key
 
                 # Log transaction
-                self.log_transaction(timestamp, int(action), next_state)
+                self.log_transaction(timestamp, int(action[0]), next_state)
                 timestamp += 1
 
                 # Store trajectory
