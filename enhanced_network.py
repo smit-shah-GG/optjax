@@ -18,7 +18,7 @@ from flax.linen.initializers import constant, orthogonal
 from flax.training.train_state import TrainState
 from jax import lax
 from jax import vmap
-from DoubleOptEnv import TradingEnv
+from MoreTechEnv import TradingEnv
 
 
 class PPOState(struct.PyTreeNode):
@@ -48,6 +48,73 @@ class TradingMetrics(NamedTuple):
     num_trades: int
 
 
+class PriceEncoder(nn.Module):
+    hidden_dim: int
+
+    @nn.compact
+    def __call__(self, price_data, training=True):
+        # Price data shape: (batch_size, window_size)
+        x = price_data
+
+        # First dense layer
+        x = nn.Dense(self.hidden_dim, kernel_init=nn.initializers.orthogonal(1.0))(x)
+        x = nn.gelu(x)
+        x = nn.LayerNorm()(x)
+
+        # Second dense layer
+        x = nn.Dense(self.hidden_dim, kernel_init=nn.initializers.orthogonal(1.0))(x)
+        x = nn.gelu(x)
+        x = nn.LayerNorm()(x)
+
+        return x
+
+
+class TechnicalEncoder(nn.Module):
+    hidden_dim: int
+
+    @nn.compact
+    def __call__(self, technical_data, training=True):
+        # Technical data shape: (batch_size, num_indicators)
+        x = technical_data
+
+        # First dense layer with smaller hidden dimension
+        x = nn.Dense(self.hidden_dim // 2, kernel_init=nn.initializers.orthogonal(1.0))(
+            x
+        )
+        x = nn.gelu(x)
+        x = nn.LayerNorm()(x)
+
+        # Second dense layer matching hidden dimension
+        x = nn.Dense(self.hidden_dim, kernel_init=nn.initializers.orthogonal(1.0))(x)
+        x = nn.gelu(x)
+        x = nn.LayerNorm()(x)
+
+        return x
+
+
+class PortfolioEncoder(nn.Module):
+    hidden_dim: int
+
+    @nn.compact
+    def __call__(self, portfolio_data, training=True):
+        # Portfolio data shape: (batch_size, num_portfolio_features)
+        x = portfolio_data
+
+        # First dense layer with smaller hidden dimension
+        x = nn.Dense(self.hidden_dim // 2, kernel_init=nn.initializers.orthogonal(1.0))(
+            x
+        )
+        x = nn.gelu(x)
+        x = nn.LayerNorm()(x)
+
+        # Second dense layer matching hidden dimension
+        x = nn.Dense(self.hidden_dim, kernel_init=nn.initializers.orthogonal(1.0))(x)
+        x = nn.gelu(x)
+        x = nn.LayerNorm()(x)
+
+        return x
+
+
 class EnhancedActorCritic(nn.Module):
     action_dim: int
     hidden_dim: int = 512
@@ -55,40 +122,80 @@ class EnhancedActorCritic(nn.Module):
 
     @nn.compact
     def __call__(self, obs, training=True):
-        x = obs
+        # Input shapes:
+        # obs: (batch_size, total_features)
+        # where total_features = window_size + num_technical_indicators + num_portfolio_features
 
-        for _ in range(self.num_layers):
-            x = nn.Dense(
-                self.hidden_dim, kernel_init=nn.initializers.orthogonal(jnp.sqrt(2))
-            )(x)
-            x = nn.gelu(x)  # Using GELU instead of ReLU
+        # Split observation into components
+        price_history = obs[:, :30]  # First 30 elements are price history
+        technical_indicators = obs[:, 30:36]  # Next 6 are technical indicators
+        portfolio_state = obs[:, 36:]  # Last 7 are portfolio state
+
+        # Encode each component
+        price_encoded = PriceEncoder(hidden_dim=self.hidden_dim)(price_history)
+        technical_encoded = TechnicalEncoder(hidden_dim=self.hidden_dim)(
+            technical_indicators
+        )
+        portfolio_encoded = PortfolioEncoder(hidden_dim=self.hidden_dim)(
+            portfolio_state
+        )
+
+        # Combine encoded features
+        combined = jnp.concatenate(
+            [price_encoded, technical_encoded, portfolio_encoded], axis=-1
+        )
+
+        # Process combined features
+        x = nn.Dense(self.hidden_dim, kernel_init=nn.initializers.orthogonal(1.0))(
+            combined
+        )
+        x = nn.gelu(x)
+        x = nn.LayerNorm()(x)
+
+        # Additional processing layers
+        for _ in range(self.num_layers - 1):
+            x = nn.Dense(self.hidden_dim, kernel_init=nn.initializers.orthogonal(1.0))(
+                x
+            )
+            x = nn.gelu(x)
             x = nn.LayerNorm()(x)
 
-        # Risk assessment
-        var = nn.Dense(1, kernel_init=nn.initializers.orthogonal(1.0))(x)
-        vol = nn.Dense(1, kernel_init=nn.initializers.orthogonal(1.0))(x)
-        sharpe = nn.Dense(1, kernel_init=nn.initializers.orthogonal(1.0))(x)
+        # Risk assessment branch
+        risk_features = nn.Dense(
+            self.hidden_dim // 2, kernel_init=nn.initializers.orthogonal(1.0)
+        )(x)
+        risk_features = nn.gelu(risk_features)
 
-        # Combine all features
+        var = nn.Dense(1, kernel_init=nn.initializers.orthogonal(1.0))(risk_features)
+        vol = nn.Dense(1, kernel_init=nn.initializers.orthogonal(1.0))(risk_features)
+        sharpe = nn.Dense(1, kernel_init=nn.initializers.orthogonal(1.0))(risk_features)
+
+        # Combine all features including risk metrics
         features = jnp.concatenate([x, var, vol, sharpe], axis=-1)
 
         # Actor head
-        actor_features = nn.Dense(self.hidden_dim)(features)
-        actor_features = nn.gelu(actor_features)  # Using GELU
+        actor_features = nn.Dense(
+            self.hidden_dim, kernel_init=nn.initializers.orthogonal(1.0)
+        )(features)
+        actor_features = nn.gelu(actor_features)
         action_logits = nn.Dense(
             self.action_dim, kernel_init=nn.initializers.orthogonal(0.01)
         )(actor_features)
 
         # Dual critics
-        critic1 = nn.Dense(self.hidden_dim)(features)
-        critic1 = nn.gelu(critic1)  # Using GELU
+        critic1 = nn.Dense(
+            self.hidden_dim, kernel_init=nn.initializers.orthogonal(1.0)
+        )(features)
+        critic1 = nn.gelu(critic1)
         value1 = nn.Dense(1, kernel_init=nn.initializers.orthogonal(1.0))(critic1)
 
-        critic2 = nn.Dense(self.hidden_dim)(features)
-        critic2 = nn.gelu(critic2)  # Using GELU
+        critic2 = nn.Dense(
+            self.hidden_dim, kernel_init=nn.initializers.orthogonal(1.0)
+        )(features)
+        critic2 = nn.gelu(critic2)
         value2 = nn.Dense(1, kernel_init=nn.initializers.orthogonal(1.0))(critic2)
 
-        # Use mean of the two critics for the final value estimate
+        # Average the two critic values
         value = jnp.squeeze((value1 + value2) / 2, axis=-1)
 
         return action_logits, value
@@ -148,7 +255,7 @@ class PPOAgent:
         )
 
         key = jax.random.PRNGKey(0)
-        dummy_obs = jnp.zeros((1, self.env.window_size + 5))
+        dummy_obs = jnp.zeros((1, self.env.observation_space.shape[0]))
         params = self.network.init(key, dummy_obs)
 
         # Setup optimizer with cosine decay
