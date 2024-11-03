@@ -1,23 +1,16 @@
-import polars as pl
-from gymnax.environments import environment
-from gymnax.environments import spaces
-
 import os
-from datetime import datetime
 from functools import partial
-from typing import Any, NamedTuple, Sequence, Tuple
-import pandas as pd
+from typing import NamedTuple, Tuple
+
 import distrax
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
-import numpy as np
 import optax
 from flax import struct
-from flax.linen.initializers import constant, orthogonal
 from flax.training.train_state import TrainState
-from jax import lax
-from jax import vmap
+from jax import lax, vmap
+
 from MoreTechEnv import TradingEnv
 
 
@@ -224,14 +217,14 @@ class PPOConfig:
     num_envs: int = 16
     num_steps: int = 256
     num_minibatches: int = 4
-    update_epochs: int = 8
+    update_epochs: int = 4
     gamma: float = 0.98
     gae_lambda: float = 0.95
     clip_eps: float = 0.4
-    ent_coef: float = 0.3
+    ent_coef: float = 0.01
     vf_coef: float = 0.25
     max_grad_norm: float = 1.0
-    lr: float = 5e-4
+    lr: float = 1e-4
     total_timesteps: int = int(5e6)
     anneal_lr: bool = False
     debug: bool = True
