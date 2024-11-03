@@ -585,8 +585,6 @@ class PPOAgent:
 
         self.transaction_log = []
         timestamp = 0
-        running_returns = []
-        running_std = jnp.array(1.0)
 
         def collect_trajectory():
             nonlocal obs, state, key, timestamp
@@ -653,23 +651,14 @@ class PPOAgent:
             # Get final value
             _, _, final_value, _ = self.get_action_and_value(self.state, obs, key)
 
-            # Update tracking
-            running_returns.extend(rewards)
-            if len(running_returns) > 1000:
-                running_returns = running_returns[-1000:]
-            running_std = jnp.maximum(jnp.std(jnp.array(running_returns)), 1e-8)
-
             # Update portfolio values and other tracking
             portfolio_values.extend([s.cash + s.shares * s.price for s in states])
             prices.extend([s.price for s in states])
             action_history.extend(actions)
 
-            # Normalize rewards
-            normalized_rewards = rewards / running_std
-
-            # Calculate advantages and returns
+            # Calculate advantages and returns using raw rewards
             advantages = self.compute_gae(
-                normalized_rewards,
+                rewards,
                 jnp.concatenate([values, jnp.array([final_value])]),
                 dones,
                 self.config.gamma,
@@ -685,7 +674,7 @@ class PPOAgent:
                     actions,
                     log_probs,
                     jnp.concatenate([values, jnp.array([final_value])]),
-                    normalized_rewards,
+                    rewards,  # Using raw rewards instead of normalized
                     dones,
                     advantages,
                     returns,
@@ -701,7 +690,6 @@ class PPOAgent:
 
             # Print progress
             print(f"\nUpdate {update}:")
-            print(f"Running reward std: {float(running_std):}")
             print(f"Total Return: {trading_metrics.total_return:}")
             print(f"Number of Trades: {trading_metrics.num_trades}")
             print(f"Policy Loss: {metrics['policy_loss']:}")
