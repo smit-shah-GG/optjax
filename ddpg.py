@@ -55,7 +55,9 @@ class ReplayBuffer:
         self.buffer.append((state, action, reward, next_state, done))
 
     def sample(self, batch_size: int) -> Tuple:
-        states, actions, rewards, next_states, dones = zip(*random.sample(self.buffer, batch_size))
+        states, actions, rewards, next_states, dones = zip(
+            *random.sample(self.buffer, batch_size)
+        )
         return (
             np.array(states),
             np.array(actions),
@@ -97,7 +99,9 @@ class DDPGAgent:
         # Initialize actor
         self.key, actor_key = jax.random.split(self.key)
         actor_params = self.actor.init(actor_key, dummy_state)
-        self.actor_state = TrainState.create(apply_fn=self.actor.apply, params=actor_params, tx=optax.adam(learning_rate))
+        self.actor_state = TrainState.create(
+            apply_fn=self.actor.apply, params=actor_params, tx=optax.adam(learning_rate)
+        )
         self.target_actor_params = actor_params
 
         # Initialize critic
@@ -193,7 +197,9 @@ class DDPGAgent:
             return 0.0, 0.0
 
         # Sample batch from replay buffer
-        states, actions, rewards, next_states, dones = self.replay_buffer.sample(self.batch_size)
+        states, actions, rewards, next_states, dones = self.replay_buffer.sample(
+            self.batch_size
+        )
 
         # Convert to jax arrays
         states = jnp.array(states)
@@ -290,13 +296,12 @@ def train_ddpg(
         avg_critic_loss = np.mean(critic_losses) if critic_losses else 0
         avg_actor_loss = np.mean(actor_losses) if actor_losses else 0
 
-        if episode % 10 == 0:
-            print(f"Episode {episode}")
-            print(f"Average Reward: {np.mean(rewards_history[-10:]):.2f}")
-            print(f"Epsilon: {epsilon:.3f}")
-            print(f"Average Critic Loss: {avg_critic_loss:.3f}")
-            print(f"Average Actor Loss: {avg_actor_loss:.3f}")
-            print("-" * 50)
+        print(f"Episode {episode}")
+        print(f"Average Reward: {np.mean(rewards_history[-10:]):}")
+        print(f"Epsilon: {epsilon:.3f}")
+        print(f"Average Critic Loss: {avg_critic_loss:}")
+        print(f"Average Actor Loss: {avg_actor_loss:}")
+        print("-" * 50)
 
     return rewards_history
 
